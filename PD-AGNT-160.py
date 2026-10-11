@@ -10,13 +10,17 @@ class IpDetector:
         self.base_url = "https://ifconfig.me"
 
     def get_current_ip(self):
-        response = requests.get(self.base_url)
+        try:
+            response = requests.get(self.base_url, timeout=10)
+        except requests.RequestException as e:
+            print(f"Ошибка сети при запросе к ifconfig.me: {e}")
+            return None
 
         if response.status_code == 200:
             return response.text.strip()
-        else:
-            print(f"Ошибка в запросе к ifconfig.me! Статус: {response.status_code}")
-            return None
+
+        print(f"Ошибка в запросе к ifconfig.me! Статус: {response.status_code}")
+        return None
 
 
 class IpInfoProvider:
@@ -25,13 +29,18 @@ class IpInfoProvider:
 
     def get_location_info(self, ip_address):
         full_url = f"{self.base_url}/{ip_address}/geo"
-        response = requests.get(full_url)
+
+        try:
+            response = requests.get(full_url, timeout=10)
+        except requests.RequestException as e:
+            print(f"Ошибка сети при запросе к IpInfo: {e}")
+            return None
 
         if response.status_code == 200:
             return response.json()
-        else:
-            print(f"Ошибка в заспросе к IpInfo! Статус: {response.status_code}")
-            return None
+
+        print(f"Ошибка в запросе к IpInfo! Статус: {response.status_code}")
+        return None
 
 
 class YandexDiskUploader:
@@ -44,7 +53,14 @@ class YandexDiskUploader:
 
     def create_folder(self, folder_name):
         params = {"path": f"disk:/{folder_name}"}
-        response = requests.put(self.base_url, headers=self.headers, params=params)
+
+        try:
+            response = requests.put(
+                self.base_url, headers=self.headers, params=params, timeout=10
+            )
+        except requests.RequestException as e:
+            print(f"Ошибка сети при создании папки: {e}")
+            return False
 
         if response.status_code == 201:
             print(f"Папка '{folder_name}' успешно создана на Яндекс.Диске!")
@@ -63,23 +79,36 @@ class YandexDiskUploader:
             "overwrite": "true"
         }
 
-        response = requests.get(upload_endpoint, headers=self.headers, params=params)
+        try:
+            response = requests.get(
+                upload_endpoint, headers=self.headers, params=params, timeout=10
+            )
+        except requests.RequestException as e:
+            print(f"Ошибка сети при получении ссылки на загрузку: {e}")
+            return False
 
-        if response.status_code == 200:
-            secret_upload_url = response.json().get("href")
-
-            with open(local_file_path, "rb") as file_bytes:
-                put_response = requests.put(secret_upload_url, data=file_bytes)
-
-                if put_response.status_code == 201:
-                    print(f"Файл '{local_file_path}' успешно загружен в папку '{folder_name}'!")
-                    return True
-                else:
-                    print(f"Ошибка загрузки файла. Статус: {put_response.status_code}")
-                    return False
-        else:
+        if response.status_code != 200:
             print(f"Не удалось получить ссылку на загрузку. Статус-код: {response.status_code}")
             return False
+
+        secret_upload_url = response.json().get("href")
+
+        try:
+            with open(local_file_path, "rb") as file_bytes:
+                put_response = requests.put(secret_upload_url, data=file_bytes, timeout=30)
+        except requests.RequestException as e:
+            print(f"Ошибка сети при загрузке файла: {e}")
+            return False
+        except OSError as e:
+            print(f"Ошибка чтения файла: {e}")
+            return False
+
+        if put_response.status_code == 201:
+            print(f"Файл '{local_file_path}' успешно загружен в папку '{folder_name}'!")
+            return True
+
+        print(f"Ошибка загрузки файла. Статус: {put_response.status_code}")
+        return False
 
 
 def main():
@@ -90,29 +119,39 @@ def main():
     YANDEX_TOKEN = os.getenv("YANDEX_TOKEN", "")
     print(f"Системный лог: Считано символов токена — {len(YANDEX_TOKEN)}")
 
+    if not YANDEX_TOKEN:
+        print("Токен Яндекс.Диска не найден. Проверьте файл .env")
+        return
+
     detector = IpDetector()
     my_ip = detector.get_current_ip()
     print(f"My IP address: {my_ip}")
 
-    if my_ip:
-        info_provider = IpInfoProvider()
-        geo_data = info_provider.get_location_info(my_ip)
-        print(f"My GEO data: {geo_data}")
+    if not my_ip:
+        print("Не удалось определить IP. Выход.")
+        return
 
-        clean_data = {my_ip: geo_data['city']}
+    info_provider = IpInfoProvider()
+    geo_data = info_provider.get_location_info(my_ip)
+    print(f"My GEO data: {geo_data}")
 
-        with open("visit_info.json", "w", encoding="utf-8") as file:
-            json.dump(clean_data, file, ensure_ascii=False, indent=4)
-        print("Файл успешно создан!")
+    if not geo_data or "city" not in geo_data:
+        print("Не удалось получить город из гео-данных. Выход.")
+        return
 
-        uploader = YandexDiskUploader(YANDEX_TOKEN)
-        uploader.create_folder("IpDetector")
-        upload_success = uploader.upload_file("IpDetector", "visit_info.json")
+    clean_data = {my_ip: geo_data["city"]}
 
-        if upload_success:
-            if os.path.exists("visit_info.json"):
-                os.remove("visit_info.json")
-                print("Локальный файл visit_info.json успешно удален.")
+    with open("visit_info.json", "w", encoding="utf-8") as file:
+        json.dump(clean_data, file, ensure_ascii=False, indent=4)
+    print("Файл visit_info.json успешно создан!")
+
+    uploader = YandexDiskUploader(YANDEX_TOKEN)
+    uploader.create_folder("IpDetector")
+    upload_success = uploader.upload_file("IpDetector", "visit_info.json")
+
+    if upload_success and os.path.exists("visit_info.json"):
+        os.remove("visit_info.json")
+        print("Локальный файл visit_info.json успешно удален.")
 
 
 if __name__ == "__main__":
